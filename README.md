@@ -48,4 +48,5 @@ options:
 ```
 
 Run `mgc-enum login` to default to an Interactive Browser login format with the client set to 
-Microsoft Azure PowerShell (1950a258-227b-4e31-a9cf-717495945fc2). Then 
+Microsoft Azure PowerShell (1950a258-227b-4e31-a9cf-717495945fc2), then run the command of your 
+choice.
