@@ -5,7 +5,7 @@ Entra directory information
 # features
 The primary goal of this script is to simplify enumeration operations that typically require 
 chaining multiple Graph API calls or mapping GUIDs to users, groups, roles, or service principals
-including the ability to:
+For example...
 - Dump a list of privileged role assignments to direct users, users within role-assignable groups, 
 and service principals.
 - Identify service principals that have high-privileged Graph API permissions
