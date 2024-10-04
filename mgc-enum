@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+
+from subprocess import run, PIPE, STDOUT
+import logging
+import json
+import os
+import sys
+import shlex
+import argparse
+
+MODPATH = os.path.dirname(os.path.realpath(__file__))
+MAX_HELP_POSITION=200
+
+# Commands
+LOGIN_CMD = "mgc{version} login --client-id {client_id} --strategy {strategy}"
+GET_GROUP_MEMBERS_CMD = "mgc groups members list --group-id {group_id}"
+GET_DIRECTORY_ROLES = "mgc directory-roles list"
+GET_DIRECTORY_ROLE_ASSIGNMENTS_CMD = (
+    "mgc directory-roles members list --directory-role-id {role}"
+)
+GET_PRIVILEGED_ROLE_ASSIGNMENTS_CMD = "mgc role-management directory role-assignments list --filter \"roleDefinitionId eq '{role}'\" --expand principal"
+GET_DIRECTORY_ROLES = "mgc directory-roles list"
+GET_ROLE_MANAGEMENT_ROLES = "mgc role-management directory role-definitions list"
+GENERATE_APP_ROLES_CMD = (
+    "mgc service-principals list --filter \"displayName eq 'Microsoft Graph'\""
+)
+GET_SERVICE_PRINCIPALS_CMD = "mgc service-principals list --all"
+GET_SP_APPROLES_CMD = (
+    "mgc service-principals app-role-assignments list --service-principal-id {sp_id}"
+)
+CURRENT_USER_MEMBERSHIP_ENUM_CMD = "mgc me transitive-member-of list"
+CURRENT_USER_ENUM_CMD = "mgc me get"
+GET_ORGANIZATION_CMD = "mgc organization list"
+GET_USERS_CMD = "mgc users list --all"
+GET_GROUPS_CMD = "mgc groups list --all"
+GET_CONDITIONAL_ACCESS_POLICIES_CMD = (
+    "mgc identity conditional-access policies list --all"
+)
+
+# Beta Commands
+GET_PRIVILEGED_ROLES_CMD = "mgc-beta role-management directory role-definitions list --filter 'isPrivileged eq true'"
+
+# Risky App Permissions
+RISKY_APP_PERMISSIONS = [
+    "RoleManagement.ReadWrite.Directory",
+    "AppRoleAssignment.ReadWrite.All",
+    "Application.ReadWrite.All",
+    "Group.ReadWrite.All",
+    "GroupMember.ReadWrite.All",
+    "ServicePrincipalEndpoint.ReadWrite.All",
+    "Directory.AccessAsUser.All"
+]
+
+# client ids
+MICROSOFT_OFFICE_CLIENT_ID = "d3590ed6-52b3-4102-aeff-aad2292ab01c"
+AZURE_AD_POWERSHELL_CLIENT_ID = "1950a258-227b-4e31-a9cf-717495945fc2"
+
+# Default Privileged Roles
+DEFAULT_PRIVILEGED_ROLES = [
+    "Application Administrator",
+    "Application Developer",
+    "Authentication Administrator",
+    "Authentication Extensibility Administrator",
+    "B2C IEF Keyset Administrator",
+    "Cloud Application Administrator",
+    "Cloud Device Administrator",
+    "Conditional Access Administrator",
+    "Directory Writers",
+    "Domain Name Administrator",
+    "External Identity Provider Administrator",
+    "Global Administrator",
+    "Global Reader",
+    "Helpdesk Administrator",
+    "Hybrid Identity Administrator",
+    "Intune Administrator",
+    "Lifecycle Workflows Administrator",
+    "Password Administrator",
+    "Privileged Authentication Administrator",
+    "Privileged Role Administrator",
+    "Security Administrator",
+    "Security Operator",
+    "Security Reader",
+    "User Administrator",
+]
+
+
+def run_mgc_cmd(cmd: str, env=None) -> dict | None:
+    output = run(shlex.split(cmd), stdout=PIPE, stderr=STDOUT, env=env)
+    if output.returncode != 0:
+        logging.error(output.stdout.decode())
+    else:
+        if output.stdout.decode() == "":
+            # For commands that dont output to stdout (ex: mgc login)
+            return None
+        else:
+            try:
+                result = json.loads(output.stdout.decode())["value"]
+                return result
+            except KeyError:
+                result = json.loads(output.stdout.decode())
+                return result
+
+
+def get_group_members(group_id: str) -> dict | None:
+    cmd = GET_GROUP_MEMBERS_CMD.format(group_id=group_id)
+    return run_mgc_cmd(cmd)
+
+
+def get_app_roles() -> list | None:
+    """
+    Return a list of app role definitions (ex: User.Read.All). This is required
+    to map app role ids to values in get_service_principals.
+    """
+    output = run_mgc_cmd(GENERATE_APP_ROLES_CMD)
+    if output is None:
+        return None
+    approles = output[0]["appRoles"]
+    approles = [
+        {
+            "id": role["id"],
+            "displayName": role["displayName"],
+            "value": role["value"],
+        }
+        for role in approles
+    ]
+    return approles
+
+
+def get_service_principals() -> dict | None:
+    approles = get_app_roles()
+    if approles is None:
+        logging.error("Unable to list app roles")
+        return None
+    sps = run_mgc_cmd(GET_SERVICE_PRINCIPALS_CMD)
+    org = get_organization()
+    if org is None or sps is None:
+        return None
+    tenant_id = org[0]["id"]
+    sps = [sp for sp in sps if sp["appOwnerOrganizationId"] == tenant_id]
+    result = []
+    privileged_sps = []
+    for sp in sps:
+        assignments = run_mgc_cmd(GET_SP_APPROLES_CMD.format(sp_id=sp["id"]))
+        if assignments is None:
+            return None
+        else:
+            assignments = [i.get("appRoleId") for i in assignments]
+            sp["appRoleAssignments"] = [
+                i["value"] for i in approles if i["id"] in assignments
+            ]
+            result.append(sp)
+        for perm in RISKY_APP_PERMISSIONS:
+            if perm in sp["appRoleAssignments"]:
+                privileged_sps.append(
+                    {"id": sp["id"], "displayName": sp["displayName"]}
+                )
+
+    return {
+        "service_principals": result,
+        "privileged_service_principals": privileged_sps,
+    }
+
+
+def get_privileged_roles() -> list | None:
+    roles = run_mgc_cmd(GET_ROLE_MANAGEMENT_ROLES)
+    if roles is None:
+        return None
+    else:
+        roles = [
+            role for role in roles if role["displayName"] in DEFAULT_PRIVILEGED_ROLES
+        ]
+        return roles
+
+
+def get_privileged_role_assignments() -> list | None:
+    roles = get_privileged_roles()
+    if roles is None:
+        return None
+    assignments = []
+    for role in roles:
+        results = run_mgc_cmd(
+            GET_PRIVILEGED_ROLE_ASSIGNMENTS_CMD.format(role=role["id"])
+        )
+        if results is None:
+            return None
+        assignees = []
+        for result in results:
+            assignee = {
+                "principalId": result["principal"]["id"],
+                "type": result["principal"]["@odata.type"],
+                "displayName": result["principal"]["displayName"],
+            }
+            if result["principal"]["@odata.type"] == "#microsoft.graph.group":
+                assignee["members"] = get_group_members(result["principal"]["id"])
+            if result["principal"]["@odata.type"] == "#microsoft.graph.user":
+                assignee["userPrincipalName"] = result["principal"]["userPrincipalName"]
+            assignees.append(assignee)
+
+        assignments.append(
+            {
+                "roleId": role["id"],
+                "roleName": role["displayName"],
+                "assignees": assignees,
+            }
+        )
+    return assignments
+
+
+def login(
+    client_id=AZURE_AD_POWERSHELL_CLIENT_ID, strategy="InteractiveBrowser", beta=False
+) -> None:
+    if beta:
+        version = "-beta"
+    else:
+        version = ""
+    run_mgc_cmd(
+        LOGIN_CMD.format(version=version, client_id=client_id, strategy=strategy)
+    )
+
+
+def get_organization() -> dict | None:
+    return run_mgc_cmd(GET_ORGANIZATION_CMD)
+
+
+def get_current_user() -> dict | None:
+    return run_mgc_cmd(CURRENT_USER_ENUM_CMD)
+
+
+def get_current_user_memberships() -> dict | None:
+    return run_mgc_cmd(CURRENT_USER_MEMBERSHIP_ENUM_CMD)
+
+
+def get_users() -> dict | None:
+    return run_mgc_cmd(GET_USERS_CMD)
+
+
+def get_groups() -> dict | None:
+    return run_mgc_cmd(GET_GROUPS_CMD)
+
+
+def get_conditional_access_policies() -> dict | None:
+    return run_mgc_cmd(GET_CONDITIONAL_ACCESS_POLICIES_CMD)
+
+
+if __name__ == "__main__":
+    ascii = r"""
+      _ __ ___   __ _  ___       ___ _ __  _   _ _ __ ___  
+     | '_ ` _ \ / _` |/ __|____ / _ \ '_ \| | | | '_ ` _ \ 
+     | | | | | | (_| | (_|_____|  __/ | | | |_| | | | | | |
+     |_| |_| |_|\__, |\___|     \___|_| |_|\__,_|_| |_| |_|
+                |___/                                      
+    """
+    cmds = [
+        "login",
+        "organization",
+        "current-user",
+        "current-user-memberships",
+        "users",
+        "groups",
+        "service-principals",
+        "privileged-role-assignments",
+        "conditional-access",
+        "all",
+    ]
+    parser = argparse.ArgumentParser(
+        prog="mgc-enum",
+        description="Thin wrapper around mgc (the Microsoft Graph CLI)",#,
+        formatter_class= lambda prog: argparse.HelpFormatter(prog, max_help_position=MAX_HELP_POSITION)
+    )
+    subparsers = parser.add_subparsers(dest="cmd", metavar='commands:')
+    parser_login = subparsers.add_parser(name='login', help='login to micrsoft graph')
+    parser_login.add_argument('-c', '--client-id', help='client id to login as')
+
+    subparsers.add_parser(name='organization', help='enumerate organization information')
+    subparsers.add_parser(name='current-user', help='enumerate current user information')
+    subparsers.add_parser(name='current-user-memberships', help='enumerate current user group and role memberships')
+    subparsers.add_parser(name='users', help='enumerate directory users')
+    subparsers.add_parser(name='groups', help='enumerate directory groups')
+    subparsers.add_parser(name='service-principals', help='enumerate service principals, including graph api permissions')
+    subparsers.add_parser(name='privileged-role-assignments', help='enumerate user, service principal, and group assignments to privleged roles')
+    subparsers.add_parser(name='conditional-access', help='enumerate conditional access policies')
+
+    parser_all = subparsers.add_parser(name='all', help='run all enumeration functions and output to a specified directory')
+    parser_all.add_argument("-d", "--directory", required=True, help="set a directory for output")
+
+    args = parser.parse_args()
+    if args.cmd:
+        match args.cmd:
+            case "login":
+                if args.client_id: 
+                    login(client_id=args.client_id)
+                else:
+                    login()
+            case "organization":
+                print(json.dumps(get_organization(), indent=2))
+            case "current-user":
+                print(json.dumps(get_current_user(), indent=2))
+            case "current-user-memberships":
+                print(json.dumps(get_current_user_memberships(), indent=2))
+            case "users":
+                print(json.dumps(get_users(), indent=2))
+            case "groups":
+                print(json.dumps(get_groups(), indent=2))
+            case "service-principals":
+                print(json.dumps(get_service_principals(), indent=2))
+            case "privileged-role-assignments":
+                print(json.dumps(get_privileged_role_assignments(), indent=2))
+            case "conditional-access":
+                print(json.dumps(get_conditional_access_policies(), indent=2))
+            case "all":
+                directory = "./output"
+                os.mkdir(f"./{directory}")
+                with open(f"{directory}/organization.json", "w") as f:
+                    f.write(json.dumps(get_organization(), indent=2))
+                with open(f"{directory}/current-user.json", "w") as f:
+                    f.write(json.dumps(get_current_user(), indent=2))
+                with open(f"{directory}/current-user-memberships.json", "w") as f:
+                    f.write(json.dumps(get_current_user_memberships(), indent=2))
+                with open(f"{directory}/users.json", "w") as f:
+                    f.write(json.dumps(get_users(), indent=2))
+                with open(f"{directory}/groups.json", "w") as f:
+                    f.write(json.dumps(get_groups(), indent=2))
+                with open(f"{directory}/service-principals.json", "w") as f:
+                    f.write(json.dumps(get_service_principals(), indent=2))
+                with open(f"{directory}/privileged-role-assignments.json", "w") as f:
+                    f.write(json.dumps(get_privileged_role_assignments(), indent=2))
+                with open(f"{directory}/conditional-access.json", "w") as f:
+                    f.write(json.dumps(get_conditional_access_policies(), indent=2))
+            case _:
+                print("Valid commands are:")
+                for cmd in cmds:
+                    print(cmd)
+    else:
+        print(ascii)
+        parser.print_help(sys.stderr)
+        sys.exit(1)
