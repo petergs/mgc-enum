@@ -4,10 +4,16 @@ import base64
 import sys
 import json
 import argparse
+from enum import Enum
 
 MSAL_KEYRING_LABEL = "MicrosoftGraph.nocae"
 MSAL_KEYRING_ACCOUNT = "MsalClientID"
 MSAL_KEYRING_SERVICE = "Microsoft.Developer.IdentityService"
+
+
+class TokenType(Enum):
+    REFRESH = 1
+    ACCESS = 2
 
 
 def cli() -> argparse.ArgumentParser:
@@ -16,8 +22,15 @@ def cli() -> argparse.ArgumentParser:
         description="Utilities for the Microsoft Graph CLI (mgc)",
     )
     subparsers = parser.add_subparsers(dest="cmd", metavar="subcommand")
-    parser_dump = subparsers.add_parser(
+    parser_list = subparsers.add_parser(
         name="list-tokens", help="Print all MSAL tokens currently stored in the keyring"
+    )
+    parser_list.add_argument(
+        "-f",
+        "--format",
+        required=False,
+        choices=["json", "table"],
+        help="Output format",
     )
     parser_dump = subparsers.add_parser(
         name="dump-token", help="Print an MSAL token from the keyring"
@@ -28,6 +41,15 @@ def cli() -> argparse.ArgumentParser:
         required=False,
         help="Azure client id",
     )
+    parser_dump.add_argument(
+        "-t",
+        "--token-type",
+        default="access",
+        choices=["access", "refresh"],
+        required=False,
+        help="Token type to get - either a refresh token or an access token",
+    )
+
     return parser
 
 
@@ -56,16 +78,23 @@ def list_tokens() -> dict:
         return json.loads(keyring_secret)
 
 
-def dump_token(client_id=None) -> str:
+def dump_token(
+    client_id: str | None = None, token_type: TokenType = TokenType.ACCESS
+) -> str:
     """
     Returns the first available MSAL token if multiple apps have been logged into
-    and no client_id is specified.
+    and no client_id is specified. Otherwise, it will return the token for the specified
+    client_id if it exists.
     """
     token = None
-    access_tokens = list_tokens()["AccessToken"]
-    for k in access_tokens.keys():
-        token = access_tokens[k]["secret"]
-        if len(access_tokens.keys()) == 1 or access_tokens[k]["client_id"] == client_id:
+    if token_type == TokenType.ACCESS:
+        tokens = list_tokens()["AccessToken"]
+    else:
+        tokens = list_tokens()["RefreshToken"]
+
+    for k in tokens.keys():
+        token = tokens[k]["secret"]
+        if len(tokens.keys()) == 1 or tokens[k]["client_id"] == client_id:
             break
 
     if token is None:
@@ -89,7 +118,11 @@ if __name__ == "__main__":
             case "list-tokens":
                 print(json.dumps(list_tokens(), indent=2))
             case "dump-token":
-                print(dump_token(args.client_id))
+                if args.token_type == "refresh":
+                    token_type = TokenType.REFRESH
+                else:
+                    token_type = TokenType.ACCESS
+                print(dump_token(client_id=args.client_id, token_type=token_type))
             case _:
                 print(f"The command specified is not valid.")
     else:
