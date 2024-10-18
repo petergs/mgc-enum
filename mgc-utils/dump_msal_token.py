@@ -1,4 +1,5 @@
 import keyring
+from keyring.backends.SecretService import Keyring
 import platform
 import base64
 import sys
@@ -8,7 +9,11 @@ if __name__ == "__main__":
     label = "MicrosoftGraph.nocae"
     account = "MsalClientID"
     service = "Microsoft.Developer.IdentityService"
-    password = keyring.get_password(account, service)
+    keyring.set_keyring(Keyring())
+    print(keyring.get_keyring())
+    password = keyring.get_password(service, label)
+
+    # if using keyring fails on linx, fall back to secretstorage
     if platform.system() == "Linux" and password is None:
         import secretstorage
 
@@ -18,7 +23,6 @@ if __name__ == "__main__":
             # put these in a list
             if item.get_label() == label:
                 password = base64.b64decode(item.get_secret()).decode("latin-1")
-                print(password)
 
     if password is None:
         print("Error: no MSAL token found. Did you already run `mgc login`?")
