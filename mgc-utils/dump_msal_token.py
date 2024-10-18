@@ -1,5 +1,4 @@
 import keyring
-from keyring.backends.SecretService import Keyring
 import platform
 import base64
 import sys
@@ -9,11 +8,15 @@ if __name__ == "__main__":
     label = "MicrosoftGraph.nocae"
     account = "MsalClientID"
     service = "Microsoft.Developer.IdentityService"
-    keyring.set_keyring(Keyring())
-    print(keyring.get_keyring())
+
+    if platform.system() == "Linux":
+        from keyring.backends.SecretService import Keyring
+
+        keyring.set_keyring(Keyring())
+
     password = keyring.get_password(service, label)
 
-    # if using keyring fails on linx, fall back to secretstorage
+    # if using keyring fails on Linx, fall back to secretstorage
     if platform.system() == "Linux" and password is None:
         import secretstorage
 
