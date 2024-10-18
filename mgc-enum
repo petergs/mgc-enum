@@ -9,7 +9,7 @@ import shlex
 import argparse
 
 MODPATH = os.path.dirname(os.path.realpath(__file__))
-MAX_HELP_POSITION=200
+MAX_HELP_POSITION = 200
 
 # Commands
 LOGIN_CMD = "mgc{version} login --client-id {client_id} --strategy {strategy}"
@@ -48,12 +48,20 @@ RISKY_APP_PERMISSIONS = [
     "Group.ReadWrite.All",
     "GroupMember.ReadWrite.All",
     "ServicePrincipalEndpoint.ReadWrite.All",
-    "Directory.AccessAsUser.All"
+    "Directory.AccessAsUser.All",
 ]
 
 # client ids
+# supports interactive
+MS_AZURE_POWERSHELL_CLIENT_ID = "1950a258-227b-4e31-a9cf-717495945fc2"
+MS_AZURE_CLI_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+
+# only supports device code
+MS_AZURE_AD_POWERSHELL_CLIENT_ID = "1b730954-1685-4b74-9bfd-dac224a7b894"
 MICROSOFT_OFFICE_CLIENT_ID = "d3590ed6-52b3-4102-aeff-aad2292ab01c"
-AZURE_AD_POWERSHELL_CLIENT_ID = "1950a258-227b-4e31-a9cf-717495945fc2"
+OFFICE_365_MANAGEMENT_CLIENT_ID = "00b41c95-dab0-4487-9791-b9d2c32c80f2"
+MSTEAMS_CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"
+
 
 # Default Privileged Roles
 DEFAULT_PRIVILEGED_ROLES = [
@@ -264,30 +272,52 @@ if __name__ == "__main__":
     ]
     parser = argparse.ArgumentParser(
         prog="mgc-enum",
-        description="Thin wrapper around mgc (the Microsoft Graph CLI)",#,
-        formatter_class= lambda prog: argparse.HelpFormatter(prog, max_help_position=MAX_HELP_POSITION)
+        description="Thin wrapper around mgc (the Microsoft Graph CLI)",
+        formatter_class=lambda prog: argparse.HelpFormatter(
+            prog, max_help_position=MAX_HELP_POSITION
+        ),
     )
-    subparsers = parser.add_subparsers(dest="cmd", metavar='commands:')
-    parser_login = subparsers.add_parser(name='login', help='login to micrsoft graph')
-    parser_login.add_argument('-c', '--client-id', help='client id to login as')
+    subparsers = parser.add_subparsers(dest="cmd", metavar="subcommand")
+    parser_login = subparsers.add_parser(name="login", help="login to micrsoft graph")
+    parser_login.add_argument("-c", "--client-id", help="client id to login as")
 
-    subparsers.add_parser(name='organization', help='enumerate organization information')
-    subparsers.add_parser(name='current-user', help='enumerate current user information')
-    subparsers.add_parser(name='current-user-memberships', help='enumerate current user group and role memberships')
-    subparsers.add_parser(name='users', help='enumerate directory users')
-    subparsers.add_parser(name='groups', help='enumerate directory groups')
-    subparsers.add_parser(name='service-principals', help='enumerate service principals, including graph api permissions')
-    subparsers.add_parser(name='privileged-role-assignments', help='enumerate user, service principal, and group assignments to privleged roles')
-    subparsers.add_parser(name='conditional-access', help='enumerate conditional access policies')
+    subparsers.add_parser(
+        name="organization", help="enumerate organization information"
+    )
+    subparsers.add_parser(
+        name="current-user", help="enumerate current user information"
+    )
+    subparsers.add_parser(
+        name="current-user-memberships",
+        help="enumerate current user group and role memberships",
+    )
+    subparsers.add_parser(name="users", help="enumerate directory users")
+    subparsers.add_parser(name="groups", help="enumerate directory groups")
+    subparsers.add_parser(
+        name="service-principals",
+        help="enumerate service principals, including graph api permissions",
+    )
+    subparsers.add_parser(
+        name="privileged-role-assignments",
+        help="enumerate user, service principal, and group assignments to privleged roles",
+    )
+    subparsers.add_parser(
+        name="conditional-access", help="enumerate conditional access policies"
+    )
 
-    parser_all = subparsers.add_parser(name='all', help='run all enumeration functions and output to a specified directory')
-    parser_all.add_argument("-d", "--directory", required=True, help="set a directory for output")
+    parser_all = subparsers.add_parser(
+        name="all",
+        help="run all enumeration functions and output to a specified directory",
+    )
+    parser_all.add_argument(
+        "-d", "--directory", required=True, help="set a directory for output"
+    )
 
     args = parser.parse_args()
     if args.cmd:
         match args.cmd:
             case "login":
-                if args.client_id: 
+                if args.client_id:
                     login(client_id=args.client_id)
                 else:
                     login()
