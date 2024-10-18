@@ -215,7 +215,7 @@ def get_privileged_role_assignments() -> list | None:
 
 
 def login(
-    client_id=AZURE_AD_POWERSHELL_CLIENT_ID, strategy="InteractiveBrowser", beta=False
+    client_id=MS_AZURE_POWERSHELL_CLIENT_ID, strategy="InteractiveBrowser", beta=False
 ) -> None:
     if beta:
         version = "-beta"
