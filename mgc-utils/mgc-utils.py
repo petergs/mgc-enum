@@ -5,10 +5,15 @@ import sys
 import json
 import argparse
 from enum import Enum
+import requests
+import sys
+import json
+
 
 MSAL_KEYRING_LABEL = "MicrosoftGraph.nocae"
 MSAL_KEYRING_ACCOUNT = "MsalClientID"
 MSAL_KEYRING_SERVICE = "Microsoft.Developer.IdentityService"
+MS_GRAPH_API_BASE_URL = "https://graph.microsoft.com"
 
 
 class TokenType(Enum):
@@ -49,8 +54,25 @@ def cli() -> argparse.ArgumentParser:
         required=False,
         help="Token type to get - either a refresh token or an access token",
     )
-
     return parser
+
+
+def graph_api_get(
+    path: str,
+    client_id: str | None = None,
+    version: str = "v1.0",
+    params: dict | None = None,
+):
+    access_token = dump_token(client_id=client_id, token_type=TokenType.ACCESS)
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    r = requests.get(
+        url=f"{MS_GRAPH_API_BASE_URL}/{version}/{path}", headers=headers, params=params
+    ).json()
+    return r
 
 
 def list_tokens() -> dict:
