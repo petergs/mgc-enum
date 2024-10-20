@@ -11,3 +11,4 @@ wheels/
 
 # project specific 
 output/
+*.json

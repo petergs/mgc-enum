@@ -9,6 +9,7 @@ dependencies = [
     "keyring>=25.4.1",
     "secretstorage>=3.3.3",
     "requests>=2.32.3",
+    "pyjwt>=2.9.0",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
