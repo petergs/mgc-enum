@@ -6,18 +6,184 @@ import argparse
 from enum import Enum
 import sys
 import json
-from pathlib import Path
+import pathlib
+from subprocess import run, PIPE, STDOUT
+import shlex
+import shutil
+import os
+import pwd
+import urllib.request
+import urllib.parse
+import urllib.error
+from dataclasses import dataclass
 
-import requests
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
-import jwt
-import keyring
+
+class TokenType(Enum):
+    def __str__(self) -> str:
+        return str(self.value)
+
+    def __repr__(self) -> str:
+        return str(self.value)
+
+    REFRESH = "RefreshToken"
+    ACCESS = "AccessToken"
+    ID = "IdToken"
 
 
-MSAL_KEYRING_LABEL = "MicrosoftGraph.nocae"
-MSAL_KEYRING_ACCOUNT = "MsalClientID"
+@dataclass
+class RefreshToken:
+    tenant_id: str
+    client_id: str
+    user_id: str
+    secret: str
+    family_id: str
+
+    @classmethod
+    def init_from_cache(cls):
+        pass
+
+    def _format_for_cache(self) -> dict:
+        rt_key = f"{self.user_id}.{self.tenant_id}-login.windows.net-refreshtoken-1--"
+        return {
+            rt_key: {
+                "home_account_id": f"{self.user_id}.{self.tenant_id}",
+                "environment": "login.windows.net",
+                # "client_info": base64.b64ecode(str({"uid": "", "tid": ""})),
+                "client_id": self.client_id,
+                "secret": self.secret,
+                "credential_type": "RefreshToken",
+                "family_id": self.family_id,
+            }
+        }
+
+
+@dataclass
+class IdToken:
+    tenant_id: str
+    client_id: str
+    username: str
+    user_id: str
+    secret: str
+
+    @classmethod
+    def init_from_cache(cls, entry: dict):
+        jwt = entry["secret"].split(".")[1]  # split jwt
+        jwt = base64.b64decode(jwt + "==").decode("latin-1")
+        jwt = json.loads(jwt)
+        username = jwt["preferred_username"]
+        tenant_id = entry["home_account_id"].split(".")[0]
+        user_id = entry["home_account_id"].split(".")[1]
+        return IdToken(
+            tenant_id=tenant_id,
+            client_id=entry["client_id"],
+            username=username,
+            user_id=user_id,
+            secret=entry["secret"],
+        )
+
+    def _format_for_cache(self) -> dict:
+        idt_key = f"{self.user_id}.{self.tenant_id}-login.windows.net-idtoken-{self.client_id}-{self.tenant_id}-"
+        return {
+            idt_key: {
+                "home_account_id": f"{self.user_id}.{self.tenant_id}",
+                "environment": "login.windows.net",
+                # "client_info": base64.b64ecode(str({"uid": "", "tid": ""})),
+                "client_id": self.client_id,
+                "secret": self.secret,
+                "credential_type": "IdToken",
+                "realm": self.tenant_id,
+            }
+        }
+
+
+@dataclass
+class MgcToken:
+    token_type: TokenType
+    tenant_id: str
+    client_id: str
+    username: str
+    user_id: str
+    token_content: None
+
+
+class RefreshResponse:
+    def __init__(self, response: dict):
+        self.token_type: str = response["token_type"]  # Bearer
+        self.scope: str = response["scope"]
+        self.expires_in: str = response["expires_in"]
+        self.ext_expires_in: str = response["ext_expires_in"]
+        self.expires_on: str = response["expires_on"]
+        self.not_before: str = response["not_before"]
+        self.resource: str = response["resources"]  # https://graph.microsoft.com
+        self.access_token: str = response["access_token"]
+        self.refresh_token: str = response["refresh_token"]
+        self.foci: str = response["foci"]
+        self.id_token: str = response["id_token"]
+
+
+@dataclass
+class AccessTokenContent:
+    home_account_id: TokenType
+    environment: str
+    client_info: str
+    client_id: str
+    secret: str
+    realm: str
+
+    @classmethod
+    def init_from_cache(cls, entry: dict):
+        pass
+
+    @classmethod
+    def init_from_refresh_response(cls, response: RefreshResponse):
+        pass
+
+    def write_cache(self):
+        pass
+
+    def _get_access_token_cache_format(self):
+        pass
+
+
+def print_tokens(tokens: list[MgcToken]) -> None:
+    for token in tokens:
+        print(token.__dict__)
+
+
+class MgcAuthRecord:
+    def __init__(self):
+        home = pathlib.Path.home()
+        with open(f"{home}/.mgc/authRecord", "r") as f:
+            auth_record = "\n".join(f.readlines())
+            auth_record = json.loads(auth_record)
+        self.username: str = auth_record["username"]
+        self.authority: str = auth_record["authority"]
+        self.tenant_id: str = auth_record["tenantId"]
+        self.client_id: str = auth_record["clientId"]
+        self.user_id: str = auth_record["homeAccountId"].split(".")[0]
+
+    def __str__(self) -> str:
+        return str(self.__dict__)
+
+    def __repr__(self) -> str:
+        return str(self.__dict__)
+
+    def _commit_auth_record(self):
+        ar = {
+            "username": self.username,
+            "authority": self.authority,
+            "homeAccountId": f"{self.user_id}.{self.tenant_id}",
+            "tenantId": self.tenant_id,
+            "clientId": self.client_id,
+            "version": "1.0",
+        }
+        home = pathlib.Path.home()
+        with open(f"{home}/.mgc/authRecord", "w") as f:
+            f.write(json.dumps(ar))
+
+
+MSAL_KEYRING_ACCOUNT = "MicrosoftGraph.nocae"
+MSAL_KEYRING_LABEL = "MsalClientID"
 MSAL_KEYRING_SERVICE = "Microsoft.Developer.IdentityService"
 MS_GRAPH_API_BASE_URL = "https://graph.microsoft.com"
 MSO_LOGIN_URL = "https://login.microsoftonline.com"
@@ -25,16 +191,16 @@ MSO_LOGIN_URL = "https://login.microsoftonline.com"
 # from https://github.com/secureworks/family-of-client-ids-research/blob/main/known-foci-clients.csv
 FOCI_CLIENTS = [
     {
+        "client_id": "1950a258-227b-4e31-a9cf-717495945fc2",
+        "app_name": "Microsoft Azure PowerShell",
+    },
+    {
         "client_id": "00b41c95-dab0-4487-9791-b9d2c32c80f2",
         "app_name": "Office 365 Management",
     },
     {
         "client_id": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
         "app_name": "Microsoft Azure CLI",
-    },
-    {
-        "client_id": "1950a258-227b-4e31-a9cf-717495945fc2",
-        "app_name": "Microsoft Azure PowerShell",
     },
     {
         "client_id": "1fec8e78-bce4-4aaf-ab1b-5451cc387264",
@@ -165,14 +331,37 @@ FOCI_CLIENTS = [
     },
 ]
 
-FOCI_CLIENTS.extend([
-    {"client_id": "fb78d390-0c51-40cd-8e17-fdbfab77341b", "app_name": "Microsoft Exchange REST API Based PowerShell"}
-])
+FOCI_CLIENTS.extend(
+    [
+        {
+            "client_id": "fb78d390-0c51-40cd-8e17-fdbfab77341b",
+            "app_name": "Microsoft Exchange REST API Based PowerShell",
+        }
+    ]
+)
 
 
-class TokenType(Enum):
-    REFRESH = 1
-    ACCESS = 2
+def urlreq(method: str, url: str, headers: dict = {}, data: dict | None = None) -> str:
+    """
+    Function for simple HTTP requests using urllib.requests
+    Ref: https://docs.python.org/3/howto/urllib2.html
+    """
+
+    encoded_data: bytes | None = None
+    if data is not None:
+        if method == "GET":
+            # urlencode data as path parameters
+            params: str = urllib.parse.urlencode(data)
+            url = f"{url}?{params}"
+        else:
+            encoded_data = urllib.parse.urlencode(data).encode("utf-8")
+
+    request = urllib.request.Request(
+        url=url, data=encoded_data, headers=headers, method=method
+    )
+
+    with urllib.request.urlopen(request) as response:
+        return response.read().decode("utf-8")
 
 
 def cli() -> argparse.ArgumentParser:
@@ -184,7 +373,9 @@ def cli() -> argparse.ArgumentParser:
     parser_list = subparsers.add_parser(
         name="list-tokens", help="Print all MSAL tokens currently stored in the keyring"
     )
-    subparsers.add_parser(name="clear-tokens", help="Clear MSAL tokens for the OS keyring")
+    subparsers.add_parser(
+        name="clear-tokens", help="Clear MSAL tokens for the OS keyring"
+    )
     parser_list.add_argument(
         "-f",
         "--format",
@@ -211,53 +402,105 @@ def cli() -> argparse.ArgumentParser:
     )
     subparsers.add_parser(name="foci-login", help="")
     subparsers.add_parser(name="foci-scope-enum", help="")
+    subparsers.add_parser(name="write-tokens", help="")
     return parser
 
 
-def graph_api_get(
-    path: str,
-    client_id: str | None = None,
-    version: str = "v1.0",
-    params: dict | None = None,
-):
-    access_token = dump_token(client_id=client_id, token_type=TokenType.ACCESS)
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-    }
-    r = requests.get(
-        url=f"{MS_GRAPH_API_BASE_URL}/{version}/{path}", headers=headers, params=params
-    ).json()
-    return r
-
-
-def list_tokens() -> dict:
+def list_tokens() -> tuple[list[MgcToken], dict]:
     if platform.system() == "Linux":
-        from keyring.backends.SecretService import Keyring
-
-        keyring.set_keyring(Keyring())
-
-    keyring_secret = keyring.get_password(MSAL_KEYRING_SERVICE, MSAL_KEYRING_LABEL)
-
-    # if using keyring fails on Linx, fall back to secretstorage
-    if platform.system() == "Linux" and keyring_secret is None:
-        import secretstorage
-
-        conn = secretstorage.dbus_init()
-        collection = secretstorage.get_default_collection(conn)
-        for item in collection.get_all_items():
-            if item.get_label() == MSAL_KEYRING_LABEL:
-                keyring_secret = base64.b64decode(item.get_secret()).decode("latin-1")
-
-    if keyring_secret is None:
-        print("Error: No MSAL token found. Did you already run `mgc login`?")
-        sys.exit(1)
+        find_cmd = f"secret-tool lookup {MSAL_KEYRING_LABEL} {MSAL_KEYRING_SERVICE}"
+        output = run(shlex.split(find_cmd), stdout=PIPE, stderr=STDOUT)
+        tokens = base64.b64decode(output.stdout.decode()).decode("utf-8")
+        tokens = json.loads(tokens)
+    elif platform.system() == "Darwin":
+        find_cmd = f'security find-generic-password -w -a "{MSAL_KEYRING_ACCOUNT}"'
+        output = run(shlex.split(find_cmd), stdout=PIPE, stderr=STDOUT)
+        tokens = json.loads(output.stdout.decode())
     else:
-        return json.loads(keyring_secret)
+        print(f"Error: Unsupported platform {platform.system()}")
+        sys.exit(1)
+
+    if tokens is None:
+        sys.exit(1)
+
+    result = []
+    for _, v in tokens["AccessToken"].items():
+        jwt = v["secret"].split(".")[1]  # split jwt
+        jwt = base64.b64decode(jwt + "==").decode("latin-1")
+        jwt = json.loads(jwt)
+        username = jwt["upn"]
+        tenant_id = jwt["tid"]
+        user_id = jwt["oid"]
+        token = MgcToken(
+            token_type=TokenType.ACCESS,
+            tenant_id=tenant_id,
+            client_id=v["client_id"],
+            username=username,
+            user_id=user_id,
+            token_content=None,
+        )
+        result.append(token)
+
+    for _, v in tokens["RefreshToken"].items():
+        jwt = v["secret"].split(".")[1]  # split jwt
+        username = ""
+        tenant_id = v["home_account_id"].split(".")[0]
+        user_id = v["home_account_id"].split(".")[1]
+        token = MgcToken(
+            token_type=TokenType.REFRESH,
+            tenant_id=tenant_id,
+            client_id=v["client_id"],
+            username=username,
+            user_id=user_id,
+            token_content=None,
+        )
+        result.append(token)
+
+    for _, v in tokens["IdToken"].items():
+        jwt = v["secret"].split(".")[1]  # split jwt
+        jwt = base64.b64decode(jwt + "==").decode("latin-1")
+        jwt = json.loads(jwt)
+        username = jwt["preferred_username"]
+        tenant_id = v["home_account_id"].split(".")[0]
+        user_id = v["home_account_id"].split(".")[1]
+        token = MgcToken(
+            token_type=TokenType.ID,
+            tenant_id=tenant_id,
+            client_id=v["client_id"],
+            username=username,
+            user_id=user_id,
+            token_content=None,
+        )
+        result.append(token)
+
+    return result, tokens
+
+
+def write_tokens() -> None:
+    # For some reason, keychain access will prompt for a keychain password for future mgc calls
+    # after modifying the token. Even with usage of the -T parameter to update the keychain item's
+    # ACL to include mgc.
+    """
+    mgc_path = shutil.which("mgc")
+    if mgc_path is None:
+        print("mgc not found in PATH")
+        sys.exit(1)
+    mgc_path = pathlib.Path(mgc_path).resolve() # resolve symlinks if present
+    """
+    if platform.system() == "Darwin":
+        token = json.dumps(list_tokens()[1])
+        add_cmd = f"security add-generic-password -a '{MSAL_KEYRING_ACCOUNT}' -s '{MSAL_KEYRING_SERVICE}' -w '{token}' -U "  # -T '{mgc_path}"
+        add_output = run(shlex.split(add_cmd), stdout=PIPE, stderr=STDOUT)
+        print(add_output.stdout.decode())
+
 
 def clear_tokens() -> None:
-    keyring.set_password(MSAL_KEYRING_SERVICE, MSAL_KEYRING_LABEL, "")
+    if platform.system() == "Darwin":
+        username = pwd.getpwuid(os.getuid()).pw_name
+        cmd = f"security delete-generic-password -a '{MSAL_KEYRING_ACCOUNT}' -s '{MSAL_KEYRING_SERVICE}'"
+        if platform.system() == "Darwin":
+            output = run(shlex.split(cmd), stdout=PIPE, stderr=STDOUT)
+            print(output.stdout.decode())
 
 
 def dump_token(
@@ -270,9 +513,9 @@ def dump_token(
     """
     token = None
     if token_type == TokenType.ACCESS:
-        tokens = list_tokens()["AccessToken"]
+        tokens = list_tokens()[1]["AccessToken"]
     else:
-        tokens = list_tokens()["RefreshToken"]
+        tokens = list_tokens()[1]["RefreshToken"]
 
     for k in tokens.keys():
         token = tokens[k]["secret"]
@@ -289,8 +532,8 @@ def dump_token(
 def foci_login(
     new_client_id: str,
     tenant_id: str,
-    refresh_token: str = None,
-    refresh_token_client_id: str = None,
+    refresh_token: str | None = None,
+    refresh_token_client_id: str | None = None,
 ) -> dict:
     """
     Use a refresh token present in the MSAL keyring entry to login as another foci app
@@ -320,21 +563,10 @@ def foci_login(
             "refresh_token": refresh_token,
             "scope": "openid",
         }
-        """
-        retry = Retry(
-            total=4,
-            backoff_factor=2,
-            status_forcelist=[400, 429, 500, 502, 503, 504],
-            allowed_methods=["POST"]
+        r = urlreq(
+            method="POST", url=f"{MSO_LOGIN_URL}/{tenant_id}/oauth2/token", data=payload
         )
-        adapter = HTTPAdapter(max_retries=retry)
-        s = requests.Session()
-        s.mount('https://', adapter)
-        """
-        r = requests.post(
-            url=f"{MSO_LOGIN_URL}/{tenant_id}/oauth2/token", data=payload
-        )
-        return r.json()
+        return json.loads(r)
     else:
         print(
             f"Error: The value supplied for new_client_id ({new_client_id}) is not a known foci client."
@@ -353,6 +585,8 @@ def foci_scope_enum(refresh_token_client_id: str, tenant_id: str) -> list:
             new_client_id=next_client,
             tenant_id=tenant_id,
         )
+        print(r)
+        exit()
         try:
             scopes = r["scope"].split(" ")
             success = True
@@ -361,7 +595,13 @@ def foci_scope_enum(refresh_token_client_id: str, tenant_id: str) -> list:
             success = False
 
         result.append(
-            {"client_id": next_client, "app_name": client["app_name"], "scopes": scopes, "foci": True, "success": success}
+            {
+                "client_id": next_client,
+                "app_name": client["app_name"],
+                "scopes": scopes,
+                "foci": True,
+                "success": success,
+            }
         )
 
     return result
@@ -372,7 +612,8 @@ if __name__ == "__main__":
     if args.cmd:
         match args.cmd:
             case "list-tokens":
-                print(json.dumps(list_tokens(), indent=2))
+                # print(json.dumps(list_tokens(), indent=2))
+                print_tokens(list_tokens()[0])
             case "clear-tokens":
                 clear_tokens()
                 print("Clearing keyring tokens...")
@@ -383,7 +624,7 @@ if __name__ == "__main__":
                     token_type = TokenType.ACCESS
                 print(dump_token(client_id=args.client_id, token_type=token_type))
             case "foci-login":
-                home = Path.home()
+                home = pathlib.Path.home()
                 with open(f"{home}/.mgc/authRecord", "r") as f:
                     auth_record = "\n".join(f.readlines())
                     auth_record = json.loads(auth_record)
@@ -402,6 +643,8 @@ if __name__ == "__main__":
                     tenant_id=tenant_id,
                 )
                 print(json.dumps(r, indent=2))
+            case "write-tokens":
+                write_tokens()
             case _:
                 print(f"The command specified is not valid.")
     else:
